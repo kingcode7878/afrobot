@@ -132,5 +132,15 @@ connectDB().then(() => {
     console.log("🚀 Bot is live and counting!");
 });
 
+const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => res.send('Bot is running!'));
+
+app.listen(PORT, () => {
+    console.log(`Port ${PORT} opened to keep Render happy.`);
+});
+
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
