@@ -71,7 +71,48 @@ bot.start(async (ctx) => {
     }
 });
 
-// 5. STATS COMMAND
+// 5. ADMIN MENU & HELP
+bot.command('admin', (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+    ctx.reply("🛠 **Afro Bot Admin Panel**\nChoose an action below:", {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "📊 View Stats", callback_data: "admin_stats" }],
+                [{ text: "👁 Preview Info", callback_data: "admin_help" }],
+                [{ text: "🔄 Refresh System", callback_data: "admin_refresh" }]
+            ]
+        }
+    });
+});
+
+bot.action('admin_stats', async (ctx) => {
+    try {
+        const totalUsers = await usersCollection.countDocuments();
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const activeUsers = await usersCollection.countDocuments({ 
+            last_active: { $gte: twentyFourHoursAgo } 
+        });
+        await ctx.answerCbQuery();
+        await ctx.reply(`📊 **Stats Report**\n\nTotal Subs: ${totalUsers}\nActive (24h): ${activeUsers}`);
+    } catch (e) { console.log(e); }
+});
+
+bot.action('admin_help', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+        "📝 **How to Preview/Send:**\n\n" +
+        "Use a vertical bar `|` to add a button.\n\n" +
+        "**Example:**\n`/preview Check out this leak! | Open App 🔞`\n\n" +
+        "This sends the message only to you for testing."
+    );
+});
+
+bot.action('admin_refresh', async (ctx) => {
+    await ctx.answerCbQuery("System Refreshing...");
+    ctx.reply("✅ Connection stable. Ready for commands.");
+});
+
+// 5.1 STATS COMMAND
 bot.command('stats', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
     try {
@@ -82,17 +123,70 @@ bot.command('stats', async (ctx) => {
     }
 });
 
-// 6. MANUAL BROADCAST (Crash-Proofed & Supports Media)
+// 5.2 PREVIEW COMMAND
+bot.command('preview', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+
+    const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!fullInput) return ctx.reply("Usage: /preview [message/URL] | [Button Text]");
+
+    const [rawContent, buttonLabel] = fullInput.split('|').map(s => s.trim());
+
+    let extraParams = {};
+    if (buttonLabel) {
+        extraParams = {
+            reply_markup: {
+                inline_keyboard: [[{ text: buttonLabel, web_app: { url: APP_URL } }]]
+            }
+        };
+    }
+
+    const args = rawContent.split(' ');
+    const firstWord = args[0];
+    const isUrl = firstWord.startsWith('http');
+    const mediaUrl = isUrl ? firstWord : null;
+    const caption = isUrl ? args.slice(1).join(' ') : rawContent;
+
+    try {
+        ctx.reply("👁 **Previewing Broadcast:**");
+        if (isUrl) {
+            const options = { caption, ...extraParams };
+            if (mediaUrl.match(/\.(mp4|mov|avi)$/i)) {
+                await ctx.replyWithVideo(mediaUrl, options);
+            } else {
+                await ctx.replyWithPhoto(mediaUrl, options);
+            }
+        } else {
+            await ctx.reply(caption, extraParams);
+        }
+    } catch (err) {
+        ctx.reply(`❌ Preview Error: ${err.message}`);
+    }
+});
+
+// 6. MANUAL BROADCAST (Crash-Proofed & Button Support)
 bot.command('send', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
 
-    const args = ctx.message.text.split(' ').slice(1);
-    if (args.length === 0) return ctx.reply("Usage: /send [message] OR /send [url] [caption]");
+    const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!fullInput) return ctx.reply("Usage: /send [message] | [Optional Button]");
 
-    const firstArg = args[0];
-    const isUrl = firstArg.startsWith('http');
-    const mediaUrl = isUrl ? firstArg : null;
-    const caption = isUrl ? args.slice(1).join(' ') : args.join(' ');
+    const [rawContent, buttonLabel] = fullInput.split('|').map(s => s.trim());
+
+    let extraParams = {};
+    if (buttonLabel) {
+        extraParams = {
+            reply_markup: {
+                inline_keyboard: [[{ text: buttonLabel, web_app: { url: APP_URL } }]]
+            }
+        };
+    }
+
+    const args = rawContent.split(' ');
+    const firstWord = args[0];
+    const isUrl = firstWord.startsWith('http');
+    const mediaUrl = isUrl ? firstWord : null;
+    const caption = isUrl ? args.slice(1).join(' ') : rawContent;
 
     const allUsers = await usersCollection.find({}).toArray();
     const broadcastId = Date.now().toString(); 
@@ -105,13 +199,14 @@ bot.command('send', async (ctx) => {
         try {
             let sentMsg;
             if (isUrl) {
+                const options = { caption, ...extraParams };
                 if (mediaUrl.match(/\.(mp4|mov|avi)$/i)) {
-                    sentMsg = await bot.telegram.sendVideo(user.chat_id, mediaUrl, { caption });
+                    sentMsg = await bot.telegram.sendVideo(user.chat_id, mediaUrl, options);
                 } else {
-                    sentMsg = await bot.telegram.sendPhoto(user.chat_id, mediaUrl, { caption });
+                    sentMsg = await bot.telegram.sendPhoto(user.chat_id, mediaUrl, options);
                 }
             } else {
-                sentMsg = await bot.telegram.sendMessage(user.chat_id, caption);
+                sentMsg = await bot.telegram.sendMessage(user.chat_id, caption, extraParams);
             }
             
             await broadcastLogsCollection.insertOne({
@@ -126,7 +221,6 @@ bot.command('send', async (ctx) => {
         } catch (err) {
             if (err.response && err.response.error_code === 403) {
                 blockedCount++;
-                // Clean up: Remove blocked users so they don't cause errors later
                 await usersCollection.deleteOne({ chat_id: user.chat_id });
             } else {
                 console.log(`Failed for ${user.chat_id}: ${err.message}`);
@@ -161,12 +255,14 @@ bot.command('deleteall', async (ctx) => {
     ctx.reply(`✨ Successfully wiped.`);
 });
 
-// 8. STARTUP
+// 8. STARTUP & GLOBAL ERROR CATCHING
 connectDB().then(() => {
-    // dropPendingUpdates: true fixes the 409 conflict error on restart
     bot.launch({ dropPendingUpdates: true });
     console.log("🚀 Bot is live, crash-proof, and secure!");
 });
+
+process.on('unhandledRejection', (reason) => console.log('Unhandled Rejection:', reason));
+process.on('uncaughtException', (err) => console.log('Uncaught Exception:', err));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
