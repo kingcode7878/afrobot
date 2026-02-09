@@ -16,8 +16,9 @@ const app = express();
 
 let usersCollection;
 let broadcastLogsCollection;
+let settingsCollection;
 
-// 2. KEEP RENDER ALIVE (Express Server)
+// 2. KEEP RENDER ALIVE
 app.get('/', (req, res) => res.send('Afro Bot is Online!'));
 app.listen(PORT, () => console.log(`✅ Port ${PORT} opened to keep Render happy.`));
 
@@ -28,18 +29,17 @@ async function connectDB() {
         const database = client.db('afro_leaks_db');
         usersCollection = database.collection('users');
         broadcastLogsCollection = database.collection('broadcast_logs');
+        settingsCollection = database.collection('settings');
         console.log("✅ Connected to MongoDB via Env Variables");
     } catch (e) {
         console.error("❌ MongoDB Connection Error:", e);
     }
 }
 
-// 4. BOT LOGIC - USER REGISTRATION (Crash-Proofed)
+// 4. BOT LOGIC - USER REGISTRATION
 bot.start(async (ctx) => {
     const userId = ctx.chat.id;
-
     try {
-        // Save user to DB
         await usersCollection.updateOne(
             { chat_id: userId },
             { 
@@ -52,29 +52,31 @@ bot.start(async (ctx) => {
             { upsert: true }
         );
 
-        console.log(`👤 New User: ${ctx.from.first_name} (@${ctx.from.username || 'no_user'}) joined.`);
+        // Fetch dynamic welcome settings from DB
+        const welcomeData = await settingsCollection.findOne({ key: "welcome_config" });
+        
+        // Use DB values if they exist, otherwise use defaults
+        const msgText = welcomeData?.text || `Welcome ${ctx.from.first_name} to Afro Leakers! 🔞`;
+        const btnText = welcomeData?.button || "Open Mini App";
 
-        // Attempt to welcome (wrapped in try/catch to prevent crash if blocked)
-        await ctx.reply(`Welcome ${ctx.from.first_name} to Afro Leakers! 🔞`, {
+        await ctx.reply(msgText, {
             reply_markup: {
-                inline_keyboard: [
-                    [{ text: "Open Mini App", web_app: { url: APP_URL } }]
-                ]
+                inline_keyboard: [[{ text: btnText, web_app: { url: APP_URL } }]]
             }
         });
     } catch (err) {
         if (err.response && err.response.error_code === 403) {
-            console.log(`🚫 User ${userId} blocked the bot. Skipping welcome.`);
+            console.log(`🚫 User ${userId} blocked the bot.`);
         } else {
             console.error("❌ Start Error:", err.message);
         }
     }
 });
 
-// 5. ADMIN MENU & HELP
+// 5. ADMIN COMMANDS & CALLBACKS
 bot.command('admin', (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
-    ctx.reply("🛠 **Afro Bot Admin Panel**\nChoose an action below:", {
+    ctx.reply("🛠 **Afro Bot Admin Panel**", {
         reply_markup: {
             inline_keyboard: [
                 [{ text: "📊 View Stats", callback_data: "admin_stats" }],
@@ -89,180 +91,126 @@ bot.action('admin_stats', async (ctx) => {
     try {
         const totalUsers = await usersCollection.countDocuments();
         const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const activeUsers = await usersCollection.countDocuments({ 
-            last_active: { $gte: twentyFourHoursAgo } 
-        });
+        const activeUsers = await usersCollection.countDocuments({ last_active: { $gte: twentyFourHoursAgo } });
         await ctx.answerCbQuery();
-        await ctx.reply(`📊 **Stats Report**\n\nTotal Subs: ${totalUsers}\nActive (24h): ${activeUsers}`);
+        await ctx.reply(`📊 **Stats**\n\nTotal: ${totalUsers}\nActive (24h): ${activeUsers}`);
     } catch (e) { console.log(e); }
 });
 
 bot.action('admin_help', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.reply(
-        "📝 **How to Preview/Send:**\n\n" +
-        "Use a vertical bar `|` to add a button.\n\n" +
-        "**Example:**\n`/preview Check out this leak! | Open App 🔞`\n\n" +
-        "This sends the message only to you for testing."
-    );
+    await ctx.reply("📢 **Command Guide:**\n\n/setwelcome [Text] | [Button Text]\n/preview [Msg/URL] | [Button Text]\n/send [Msg/URL] | [Button Text]");
 });
 
 bot.action('admin_refresh', async (ctx) => {
     await ctx.answerCbQuery("System Refreshing...");
-    ctx.reply("✅ Connection stable. Ready for commands.");
+    ctx.reply("✅ Connection stable.");
 });
 
-// 5.1 STATS COMMAND
+// 5.1 CHANGE WELCOME SETTINGS
+bot.command('setwelcome', async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+    const input = ctx.message.text.split(' ').slice(1).join(' ');
+    if (!input || !input.includes('|')) {
+        return ctx.reply("Usage: /setwelcome Message Text | Button Text");
+    }
+
+    const [text, button] = input.split('|').map(s => s.trim());
+    await settingsCollection.updateOne(
+        { key: "welcome_config" },
+        { $set: { text, button } },
+        { upsert: true }
+    );
+    ctx.reply(`✅ Welcome updated!\n\nText: ${text}\nButton: ${button}`);
+});
+
+// 5.2 STATS COMMAND
 bot.command('stats', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
-    try {
-        const totalUsers = await usersCollection.countDocuments();
-        ctx.reply(`📊 **Afro Bot Stats**\n\nTotal Subscribers: ${totalUsers}`);
-    } catch (err) {
-        ctx.reply("Error fetching stats.");
-    }
+    const totalUsers = await usersCollection.countDocuments();
+    ctx.reply(`📊 Total Subscribers: ${totalUsers}`);
 });
 
-// 5.2 PREVIEW COMMAND
+// 5.3 PREVIEW COMMAND
 bot.command('preview', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
-
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!fullInput) return ctx.reply("Usage: /preview [message/URL] | [Button Text]");
+    if (!fullInput) return ctx.reply("Usage: /preview [Msg/URL] | [Button]");
 
-    const [rawContent, buttonLabel] = fullInput.split('|').map(s => s.trim());
-
-    let extraParams = {};
-    if (buttonLabel) {
-        extraParams = {
-            reply_markup: {
-                inline_keyboard: [[{ text: buttonLabel, web_app: { url: APP_URL } }]]
-            }
-        };
-    }
-
-    const args = rawContent.split(' ');
-    const firstWord = args[0];
-    const isUrl = firstWord.startsWith('http');
-    const mediaUrl = isUrl ? firstWord : null;
-    const caption = isUrl ? args.slice(1).join(' ') : rawContent;
+    const [content, btnLabel] = fullInput.split('|').map(s => s.trim());
+    const extra = btnLabel ? { reply_markup: { inline_keyboard: [[{ text: btnLabel, web_app: { url: APP_URL } }]] } } : {};
+    
+    const args = content.split(' ');
+    const isUrl = args[0].startsWith('http');
 
     try {
-        ctx.reply("👁 **Previewing Broadcast:**");
         if (isUrl) {
-            const options = { caption, ...extraParams };
-            if (mediaUrl.match(/\.(mp4|mov|avi)$/i)) {
-                await ctx.replyWithVideo(mediaUrl, options);
-            } else {
-                await ctx.replyWithPhoto(mediaUrl, options);
-            }
+            const media = args[0];
+            const cap = args.slice(1).join(' ');
+            if (media.match(/\.(mp4|mov|avi)$/i)) await ctx.replyWithVideo(media, { caption: cap, ...extra });
+            else await ctx.replyWithPhoto(media, { caption: cap, ...extra });
         } else {
-            await ctx.reply(caption, extraParams);
+            await ctx.reply(content, extra);
         }
-    } catch (err) {
-        ctx.reply(`❌ Preview Error: ${err.message}`);
-    }
+    } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
 });
 
-// 6. MANUAL BROADCAST (Crash-Proofed & Button Support)
+// 6. MANUAL BROADCAST (To ALL users)
 bot.command('send', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
-
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!fullInput) return ctx.reply("Usage: /send [message] | [Optional Button]");
+    if (!fullInput) return ctx.reply("Usage: /send [Msg/URL] | [Button]");
 
-    const [rawContent, buttonLabel] = fullInput.split('|').map(s => s.trim());
-
-    let extraParams = {};
-    if (buttonLabel) {
-        extraParams = {
-            reply_markup: {
-                inline_keyboard: [[{ text: buttonLabel, web_app: { url: APP_URL } }]]
-            }
-        };
-    }
-
-    const args = rawContent.split(' ');
-    const firstWord = args[0];
-    const isUrl = firstWord.startsWith('http');
-    const mediaUrl = isUrl ? firstWord : null;
-    const caption = isUrl ? args.slice(1).join(' ') : rawContent;
+    const [content, btnLabel] = fullInput.split('|').map(s => s.trim());
+    const extra = btnLabel ? { reply_markup: { inline_keyboard: [[{ text: btnLabel, web_app: { url: APP_URL } }]] } } : {};
+    
+    const args = content.split(' ');
+    const isUrl = args[0].startsWith('http');
+    const media = isUrl ? args[0] : null;
+    const cap = isUrl ? args.slice(1).join(' ') : content;
 
     const allUsers = await usersCollection.find({}).toArray();
-    const broadcastId = Date.now().toString(); 
-    let successCount = 0;
-    let blockedCount = 0;
-
     ctx.reply(`🚀 Broadcasting to ${allUsers.length} users...`);
 
+    let count = 0;
     for (const user of allUsers) {
         try {
-            let sentMsg;
+            let sent;
             if (isUrl) {
-                const options = { caption, ...extraParams };
-                if (mediaUrl.match(/\.(mp4|mov|avi)$/i)) {
-                    sentMsg = await bot.telegram.sendVideo(user.chat_id, mediaUrl, options);
-                } else {
-                    sentMsg = await bot.telegram.sendPhoto(user.chat_id, mediaUrl, options);
-                }
+                if (media.match(/\.(mp4|mov|avi)$/i)) sent = await bot.telegram.sendVideo(user.chat_id, media, { caption: cap, ...extra });
+                else sent = await bot.telegram.sendPhoto(user.chat_id, media, { caption: cap, ...extra });
             } else {
-                sentMsg = await bot.telegram.sendMessage(user.chat_id, caption, extraParams);
+                sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
             }
-            
-            await broadcastLogsCollection.insertOne({
-                broadcast_id: broadcastId,
-                chat_id: user.chat_id,
-                message_id: sentMsg.message_id,
-                sent_at: new Date()
-            });
-
-            successCount++;
-            await new Promise(resolve => setTimeout(resolve, 50)); 
+            // Tag with "last" so we can undo this specific broadcast
+            await broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() });
+            count++;
+            await new Promise(r => setTimeout(r, 50));
         } catch (err) {
-            if (err.response && err.response.error_code === 403) {
-                blockedCount++;
-                await usersCollection.deleteOne({ chat_id: user.chat_id });
-            } else {
-                console.log(`Failed for ${user.chat_id}: ${err.message}`);
-            }
+            if (err.response?.error_code === 403) await usersCollection.deleteOne({ chat_id: user.chat_id });
         }
     }
-    ctx.reply(`✅ Broadcast finished.\n\nSent: ${successCount}\nRemoved (Blocked): ${blockedCount}`);
+    ctx.reply(`✅ Sent to ${count} users.`);
 });
 
 // 7. UNDO COMMAND
 bot.command('deleteall', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
-
-    const lastLog = await broadcastLogsCollection.find().sort({ sent_at: -1 }).limit(1).toArray();
-    if (lastLog.length === 0) return ctx.reply("No history found.");
-
-    const targetId = lastLog[0].broadcast_id;
-    const messagesToDelete = await broadcastLogsCollection.find({ broadcast_id: targetId }).toArray();
-
-    ctx.reply(`🗑 Deleting ${messagesToDelete.length} messages...`);
-
-    for (const item of messagesToDelete) {
-        try {
-            await bot.telegram.deleteMessage(item.chat_id, item.message_id);
-            await new Promise(resolve => setTimeout(resolve, 30)); 
-        } catch (err) {
-            console.log(`Could not delete for ${item.chat_id}`);
-        }
+    const logs = await broadcastLogsCollection.find({ broadcast_id: "last" }).toArray();
+    for (const log of logs) {
+        try { await bot.telegram.deleteMessage(log.chat_id, log.message_id); } catch (e) {}
     }
-
-    await broadcastLogsCollection.deleteMany({ broadcast_id: targetId });
-    ctx.reply(`✨ Successfully wiped.`);
+    await broadcastLogsCollection.deleteMany({ broadcast_id: "last" });
+    ctx.reply("✨ Wiped.");
 });
 
-// 8. STARTUP & GLOBAL ERROR CATCHING
+// 8. STARTUP & GLOBAL SAFETY
 connectDB().then(() => {
     bot.launch({ dropPendingUpdates: true });
-    console.log("🚀 Bot is live, crash-proof, and secure!");
+    console.log("🚀 Bot is live!");
 });
 
-process.on('unhandledRejection', (reason) => console.log('Unhandled Rejection:', reason));
-process.on('uncaughtException', (err) => console.log('Uncaught Exception:', err));
-
+process.on('unhandledRejection', (r) => console.log('Rejection:', r));
+process.on('uncaughtException', (e) => console.log('Exception:', e));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
