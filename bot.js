@@ -57,7 +57,7 @@ bot.start(async (ctx) => {
         
         // Use DB values if they exist, otherwise use defaults
         const msgText = welcomeData?.text || `Welcome ${ctx.from.first_name} to Afro Leakers! 🔞`;
-        const btnText = welcomeData?.button || "Open Mini App";
+        const btnText = welcomeData?.button || "WATCH LEAKS 🔞";
 
         await ctx.reply(msgText, {
             reply_markup: {
