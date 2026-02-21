@@ -6,9 +6,11 @@ const express = require('express');
 // 1. CONFIGURATION
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
-const ADMIN_ID = parseInt(process.env.ADMIN_ID); 
 const APP_URL = process.env.APP_URL;
 const PORT = process.env.PORT || 3000;
+
+// MULTI-ADMIN SETUP: Converts "123,456" from env into [123, 456]
+const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
 
 const bot = new Telegraf(BOT_TOKEN);
 const client = new MongoClient(MONGO_URI);
@@ -18,9 +20,12 @@ let usersCollection;
 let broadcastLogsCollection;
 let settingsCollection;
 
+// Helper to check if a user is an admin
+const isAdmin = (id) => ADMIN_IDS.includes(id);
+
 // 2. KEEP RENDER ALIVE
 app.get('/', (req, res) => res.send('Afro Bot is Online!'));
-app.listen(PORT, () => console.log(`✅ Port ${PORT} opened to keep Render happy.`));
+app.listen(PORT, () => console.log(`✅ Web Server: Port ${PORT} opened. Render HTTP probe active.`));
 
 // 3. CONNECT TO DATABASE
 async function connectDB() {
@@ -30,15 +35,17 @@ async function connectDB() {
         usersCollection = database.collection('users');
         broadcastLogsCollection = database.collection('broadcast_logs');
         settingsCollection = database.collection('settings');
-        console.log("✅ Connected to MongoDB via Env Variables");
+        console.log("✅ Database: Connected successfully to MongoDB.");
     } catch (e) {
-        console.error("❌ MongoDB Connection Error:", e);
+        console.error("❌ Database Error:", e);
     }
 }
 
 // 4. BOT LOGIC - USER REGISTRATION
 bot.start(async (ctx) => {
     const userId = ctx.chat.id;
+    console.log(`👤 Activity: User ${userId} (${ctx.from.username || 'no-username'}) joined.`);
+    
     try {
         await usersCollection.updateOne(
             { chat_id: userId },
@@ -52,10 +59,7 @@ bot.start(async (ctx) => {
             { upsert: true }
         );
 
-        // Fetch dynamic welcome settings from DB
         const welcomeData = await settingsCollection.findOne({ key: "welcome_config" });
-        
-        // Use DB values if they exist, otherwise use defaults
         const msgText = welcomeData?.text || `Welcome ${ctx.from.first_name} to Afro Leakers! 🔞`;
         const btnText = welcomeData?.button || "WATCH LEAKS 🔞";
 
@@ -68,14 +72,15 @@ bot.start(async (ctx) => {
         if (err.response && err.response.error_code === 403) {
             console.log(`🚫 User ${userId} blocked the bot.`);
         } else {
-            console.error("❌ Start Error:", err.message);
+            console.error(`❌ Start Error for ${userId}:`, err.message);
         }
     }
 });
 
 // 5. ADMIN COMMANDS & CALLBACKS
 bot.command('admin', (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
+    console.log(`🔑 Admin: ${ctx.from.id} accessed admin panel.`);
     ctx.reply("🛠 **Afro Bot Admin Panel**", {
         reply_markup: {
             inline_keyboard: [
@@ -88,28 +93,33 @@ bot.command('admin', (ctx) => {
 });
 
 bot.action('admin_stats', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
     try {
         const totalUsers = await usersCollection.countDocuments();
         const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         const activeUsers = await usersCollection.countDocuments({ last_active: { $gte: twentyFourHoursAgo } });
+        console.log(`📊 Stats: Total ${totalUsers}, Active ${activeUsers}.`);
         await ctx.answerCbQuery();
         await ctx.reply(`📊 **Stats**\n\nTotal: ${totalUsers}\nActive (24h): ${activeUsers}`);
-    } catch (e) { console.log(e); }
+    } catch (e) { console.error("❌ Stats Error:", e); }
 });
 
 bot.action('admin_help', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
     await ctx.answerCbQuery();
     await ctx.reply("📢 **Command Guide:**\n\n/setwelcome [Text] | [Button Text]\n/preview [Msg/URL] | [Button Text]\n/send [Msg/URL] | [Button Text]");
 });
 
 bot.action('admin_refresh', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
+    console.log(`🔄 System: Refresh triggered by ${ctx.from.id}`);
     await ctx.answerCbQuery("System Refreshing...");
     ctx.reply("✅ Connection stable.");
 });
 
 // 5.1 CHANGE WELCOME SETTINGS
 bot.command('setwelcome', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     const input = ctx.message.text.split(' ').slice(1).join(' ');
     if (!input || !input.includes('|')) {
         return ctx.reply("Usage: /setwelcome Message Text | Button Text");
@@ -121,19 +131,20 @@ bot.command('setwelcome', async (ctx) => {
         { $set: { text, button } },
         { upsert: true }
     );
+    console.log(`✅ Settings: Welcome message updated by ${ctx.from.id}`);
     ctx.reply(`✅ Welcome updated!\n\nText: ${text}\nButton: ${button}`);
 });
 
 // 5.2 STATS COMMAND
 bot.command('stats', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     const totalUsers = await usersCollection.countDocuments();
     ctx.reply(`📊 Total Subscribers: ${totalUsers}`);
 });
 
 // 5.3 PREVIEW COMMAND
 bot.command('preview', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
     if (!fullInput) return ctx.reply("Usage: /preview [Msg/URL] | [Button]");
 
@@ -155,9 +166,9 @@ bot.command('preview', async (ctx) => {
     } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
 });
 
-// 6. MANUAL BROADCAST (To ALL users)
+// 6. MANUAL BROADCAST WITH LIVE LOGGING
 bot.command('send', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
     if (!fullInput) return ctx.reply("Usage: /send [Msg/URL] | [Button]");
 
@@ -170,6 +181,7 @@ bot.command('send', async (ctx) => {
     const cap = isUrl ? args.slice(1).join(' ') : content;
 
     const allUsers = await usersCollection.find({}).toArray();
+    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${allUsers.length} users.`);
     ctx.reply(`🚀 Broadcasting to ${allUsers.length} users...`);
 
     let count = 0;
@@ -182,20 +194,29 @@ bot.command('send', async (ctx) => {
             } else {
                 sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
             }
-            // Tag with "last" so we can undo this specific broadcast
             await broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() });
             count++;
+
+            // Progress tracking log every 10 users
+            if (count % 10 === 0) console.log(`📡 Progress: Sent to ${count}/${allUsers.length}`);
+
             await new Promise(r => setTimeout(r, 50));
         } catch (err) {
-            if (err.response?.error_code === 403) await usersCollection.deleteOne({ chat_id: user.chat_id });
+            console.log(`⚠️ Warning: Failed for ${user.chat_id}. Error: ${err.message}`);
+            if (err.response?.error_code === 403) {
+                console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
+                await usersCollection.deleteOne({ chat_id: user.chat_id });
+            }
         }
     }
+    console.log(`✅ Broadcast: Completed. Total successfully sent: ${count}`);
     ctx.reply(`✅ Sent to ${count} users.`);
 });
 
 // 7. UNDO COMMAND
 bot.command('deleteall', async (ctx) => {
-    if (ctx.from.id !== ADMIN_ID) return ctx.reply("Unauthorized.");
+    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
+    console.log(`🧹 Cleanup: ${ctx.from.id} triggered /deleteall`);
     const logs = await broadcastLogsCollection.find({ broadcast_id: "last" }).toArray();
     for (const log of logs) {
         try { await bot.telegram.deleteMessage(log.chat_id, log.message_id); } catch (e) {}
@@ -207,10 +228,10 @@ bot.command('deleteall', async (ctx) => {
 // 8. STARTUP & GLOBAL SAFETY
 connectDB().then(() => {
     bot.launch({ dropPendingUpdates: true });
-    console.log("🚀 Bot is live!");
+    console.log("🚀 Startup: Bot is live and logging activity!");
 });
 
-process.on('unhandledRejection', (r) => console.log('Rejection:', r));
-process.on('uncaughtException', (e) => console.log('Exception:', e));
+process.on('unhandledRejection', (r) => console.error('🔴 Critical Rejection:', r));
+process.on('uncaughtException', (e) => console.error('🔴 Critical Exception:', e));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
