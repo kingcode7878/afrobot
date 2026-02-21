@@ -12,9 +12,9 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
 
 const bot = new Telegraf(BOT_TOKEN);
+// Removed the unsupported 'keepAlive' option to fix the crash
 const client = new MongoClient(MONGO_URI, {
-    connectTimeoutMS: 30000,
-    keepAlive: true,
+    connectTimeoutMS: 30000
 });
 const app = express();
 
@@ -36,10 +36,10 @@ async function connectDB() {
         usersCollection = database.collection('users');
         broadcastLogsCollection = database.collection('broadcast_logs');
         settingsCollection = database.collection('settings');
-        console.log("✅ Database: Connected with Keep-Alive.");
+        console.log("✅ Database: Connected successfully.");
     } catch (e) {
         console.error("❌ Database Error:", e);
-        setTimeout(connectDB, 5000); // Retry connection
+        setTimeout(connectDB, 5000); 
     }
 }
 
@@ -62,7 +62,7 @@ bot.start(async (ctx) => {
         );
 
         const welcomeData = await settingsCollection.findOne({ key: "welcome_config" });
-        const msgText = welcomeData?.text || `Welcome ${ctx.from.first_name} to Afro Leakers! 🔞`;
+        const msgText = welcomeData?.text || `Welcome ${ctx.from.first_name} to Xclusive Premium! 🔞`;
         const btnText = welcomeData?.button || "WATCH LEAKS 🔞";
 
         await ctx.reply(msgText, {
@@ -75,7 +75,7 @@ bot.start(async (ctx) => {
     }
 });
 
-// 5. ADMIN COMMANDS & CALLBACKS (With Timeout Safety)
+// 5. ADMIN COMMANDS & CALLBACKS
 bot.command('admin', (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     console.log(`🔑 Admin Panel opened by ${ctx.from.id}`);
@@ -154,7 +154,7 @@ bot.command('preview', async (ctx) => {
     } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
 });
 
-// 6. IMPROVED BROADCAST (100ms delay for stability)
+// 6. BROADCAST (100ms delay for stability)
 bot.command('send', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
@@ -168,7 +168,7 @@ bot.command('send', async (ctx) => {
     const cap = isUrl ? content.split(' ').slice(1).join(' ') : content;
 
     const allUsers = await usersCollection.find({}).toArray();
-    console.log(`🚀 Broadcast: Started for ${allUsers.length} users.`);
+    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${allUsers.length} users.`);
     ctx.reply(`🚀 Broadcasting to ${allUsers.length} users...`);
 
     let count = 0;
@@ -186,7 +186,6 @@ bot.command('send', async (ctx) => {
             
             if (count % 20 === 0) console.log(`📡 Progress: ${count}/${allUsers.length}`);
             
-            // Increased delay to 100ms to prevent connection choking
             await new Promise(r => setTimeout(r, 100)); 
         } catch (err) {
             if (err.response?.error_code === 403) {
@@ -213,7 +212,7 @@ bot.command('deleteall', async (ctx) => {
 // 8. STARTUP
 connectDB().then(() => {
     bot.launch({ dropPendingUpdates: true });
-    console.log("🚀 Startup: Bot is live with Stability Patch.");
+    console.log("🚀 Startup: Bot is live!");
 });
 
 process.on('unhandledRejection', (r) => console.error('🔴 Rejection:', r));
