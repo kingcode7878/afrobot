@@ -9,25 +9,26 @@ const MONGO_URI = process.env.MONGO_URI;
 const APP_URL = process.env.APP_URL;
 const PORT = process.env.PORT || 3000;
 
-// MULTI-ADMIN SETUP: Converts "123,456" from env into [123, 456]
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
 
 const bot = new Telegraf(BOT_TOKEN);
-const client = new MongoClient(MONGO_URI);
+const client = new MongoClient(MONGO_URI, {
+    connectTimeoutMS: 30000,
+    keepAlive: true,
+});
 const app = express();
 
 let usersCollection;
 let broadcastLogsCollection;
 let settingsCollection;
 
-// Helper to check if a user is an admin
 const isAdmin = (id) => ADMIN_IDS.includes(id);
 
 // 2. KEEP RENDER ALIVE
 app.get('/', (req, res) => res.send('Afro Bot is Online!'));
-app.listen(PORT, () => console.log(`✅ Web Server: Port ${PORT} opened. Render HTTP probe active.`));
+app.listen(PORT, () => console.log(`✅ Web Server: Port ${PORT} opened.`));
 
-// 3. CONNECT TO DATABASE
+// 3. CONNECT TO DATABASE WITH RECONNECT LOGIC
 async function connectDB() {
     try {
         await client.connect();
@@ -35,16 +36,17 @@ async function connectDB() {
         usersCollection = database.collection('users');
         broadcastLogsCollection = database.collection('broadcast_logs');
         settingsCollection = database.collection('settings');
-        console.log("✅ Database: Connected successfully to MongoDB.");
+        console.log("✅ Database: Connected with Keep-Alive.");
     } catch (e) {
         console.error("❌ Database Error:", e);
+        setTimeout(connectDB, 5000); // Retry connection
     }
 }
 
 // 4. BOT LOGIC - USER REGISTRATION
 bot.start(async (ctx) => {
     const userId = ctx.chat.id;
-    console.log(`👤 Activity: User ${userId} (${ctx.from.username || 'no-username'}) joined.`);
+    console.log(`👤 Activity: User ${userId} started bot.`);
     
     try {
         await usersCollection.updateOne(
@@ -69,18 +71,14 @@ bot.start(async (ctx) => {
             }
         });
     } catch (err) {
-        if (err.response && err.response.error_code === 403) {
-            console.log(`🚫 User ${userId} blocked the bot.`);
-        } else {
-            console.error(`❌ Start Error for ${userId}:`, err.message);
-        }
+        console.error(`❌ Start Error: ${err.message}`);
     }
 });
 
-// 5. ADMIN COMMANDS & CALLBACKS
+// 5. ADMIN COMMANDS & CALLBACKS (With Timeout Safety)
 bot.command('admin', (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
-    console.log(`🔑 Admin: ${ctx.from.id} accessed admin panel.`);
+    console.log(`🔑 Admin Panel opened by ${ctx.from.id}`);
     ctx.reply("🛠 **Afro Bot Admin Panel**", {
         reply_markup: {
             inline_keyboard: [
@@ -94,14 +92,23 @@ bot.command('admin', (ctx) => {
 
 bot.action('admin_stats', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
+    
+    const safetyTimeout = setTimeout(() => {
+        ctx.reply("⚠️ Database is lagging. Please wait...");
+    }, 4000);
+
     try {
         const totalUsers = await usersCollection.countDocuments();
         const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         const activeUsers = await usersCollection.countDocuments({ last_active: { $gte: twentyFourHoursAgo } });
-        console.log(`📊 Stats: Total ${totalUsers}, Active ${activeUsers}.`);
+        
+        clearTimeout(safetyTimeout);
         await ctx.answerCbQuery();
         await ctx.reply(`📊 **Stats**\n\nTotal: ${totalUsers}\nActive (24h): ${activeUsers}`);
-    } catch (e) { console.error("❌ Stats Error:", e); }
+    } catch (e) { 
+        clearTimeout(safetyTimeout);
+        console.error("❌ Stats Error:", e); 
+    }
 });
 
 bot.action('admin_help', async (ctx) => {
@@ -112,37 +119,20 @@ bot.action('admin_help', async (ctx) => {
 
 bot.action('admin_refresh', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return;
-    console.log(`🔄 System: Refresh triggered by ${ctx.from.id}`);
     await ctx.answerCbQuery("System Refreshing...");
     ctx.reply("✅ Connection stable.");
 });
 
-// 5.1 CHANGE WELCOME SETTINGS
 bot.command('setwelcome', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     const input = ctx.message.text.split(' ').slice(1).join(' ');
-    if (!input || !input.includes('|')) {
-        return ctx.reply("Usage: /setwelcome Message Text | Button Text");
-    }
+    if (!input || !input.includes('|')) return ctx.reply("Usage: /setwelcome Text | Button");
 
     const [text, button] = input.split('|').map(s => s.trim());
-    await settingsCollection.updateOne(
-        { key: "welcome_config" },
-        { $set: { text, button } },
-        { upsert: true }
-    );
-    console.log(`✅ Settings: Welcome message updated by ${ctx.from.id}`);
-    ctx.reply(`✅ Welcome updated!\n\nText: ${text}\nButton: ${button}`);
+    await settingsCollection.updateOne({ key: "welcome_config" }, { $set: { text, button } }, { upsert: true });
+    ctx.reply(`✅ Welcome updated!`);
 });
 
-// 5.2 STATS COMMAND
-bot.command('stats', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
-    const totalUsers = await usersCollection.countDocuments();
-    ctx.reply(`📊 Total Subscribers: ${totalUsers}`);
-});
-
-// 5.3 PREVIEW COMMAND
 bot.command('preview', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
@@ -150,14 +140,12 @@ bot.command('preview', async (ctx) => {
 
     const [content, btnLabel] = fullInput.split('|').map(s => s.trim());
     const extra = btnLabel ? { reply_markup: { inline_keyboard: [[{ text: btnLabel, web_app: { url: APP_URL } }]] } } : {};
-    
-    const args = content.split(' ');
-    const isUrl = args[0].startsWith('http');
+    const isUrl = content.split(' ')[0].startsWith('http');
 
     try {
         if (isUrl) {
-            const media = args[0];
-            const cap = args.slice(1).join(' ');
+            const media = content.split(' ')[0];
+            const cap = content.split(' ').slice(1).join(' ');
             if (media.match(/\.(mp4|mov|avi)$/i)) await ctx.replyWithVideo(media, { caption: cap, ...extra });
             else await ctx.replyWithPhoto(media, { caption: cap, ...extra });
         } else {
@@ -166,7 +154,7 @@ bot.command('preview', async (ctx) => {
     } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
 });
 
-// 6. MANUAL BROADCAST WITH LIVE LOGGING
+// 6. IMPROVED BROADCAST (100ms delay for stability)
 bot.command('send', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     const fullInput = ctx.message.text.split(' ').slice(1).join(' ');
@@ -175,13 +163,12 @@ bot.command('send', async (ctx) => {
     const [content, btnLabel] = fullInput.split('|').map(s => s.trim());
     const extra = btnLabel ? { reply_markup: { inline_keyboard: [[{ text: btnLabel, web_app: { url: APP_URL } }]] } } : {};
     
-    const args = content.split(' ');
-    const isUrl = args[0].startsWith('http');
-    const media = isUrl ? args[0] : null;
-    const cap = isUrl ? args.slice(1).join(' ') : content;
+    const isUrl = content.split(' ')[0].startsWith('http');
+    const media = isUrl ? content.split(' ')[0] : null;
+    const cap = isUrl ? content.split(' ').slice(1).join(' ') : content;
 
     const allUsers = await usersCollection.find({}).toArray();
-    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${allUsers.length} users.`);
+    console.log(`🚀 Broadcast: Started for ${allUsers.length} users.`);
     ctx.reply(`🚀 Broadcasting to ${allUsers.length} users...`);
 
     let count = 0;
@@ -196,27 +183,25 @@ bot.command('send', async (ctx) => {
             }
             await broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() });
             count++;
-
-            // Progress tracking log every 10 users
-            if (count % 10 === 0) console.log(`📡 Progress: Sent to ${count}/${allUsers.length}`);
-
-            await new Promise(r => setTimeout(r, 50));
+            
+            if (count % 20 === 0) console.log(`📡 Progress: ${count}/${allUsers.length}`);
+            
+            // Increased delay to 100ms to prevent connection choking
+            await new Promise(r => setTimeout(r, 100)); 
         } catch (err) {
-            console.log(`⚠️ Warning: Failed for ${user.chat_id}. Error: ${err.message}`);
             if (err.response?.error_code === 403) {
-                console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
+                console.log(`🗑 Cleanup: Removed ${user.chat_id}`);
                 await usersCollection.deleteOne({ chat_id: user.chat_id });
             }
         }
     }
-    console.log(`✅ Broadcast: Completed. Total successfully sent: ${count}`);
+    console.log(`✅ Broadcast: Completed. Sent to ${count}.`);
     ctx.reply(`✅ Sent to ${count} users.`);
 });
 
-// 7. UNDO COMMAND
 bot.command('deleteall', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
-    console.log(`🧹 Cleanup: ${ctx.from.id} triggered /deleteall`);
+    console.log(`🧹 DeleteAll: Triggered by ${ctx.from.id}`);
     const logs = await broadcastLogsCollection.find({ broadcast_id: "last" }).toArray();
     for (const log of logs) {
         try { await bot.telegram.deleteMessage(log.chat_id, log.message_id); } catch (e) {}
@@ -225,13 +210,13 @@ bot.command('deleteall', async (ctx) => {
     ctx.reply("✨ Wiped.");
 });
 
-// 8. STARTUP & GLOBAL SAFETY
+// 8. STARTUP
 connectDB().then(() => {
     bot.launch({ dropPendingUpdates: true });
-    console.log("🚀 Startup: Bot is live and logging activity!");
+    console.log("🚀 Startup: Bot is live with Stability Patch.");
 });
 
-process.on('unhandledRejection', (r) => console.error('🔴 Critical Rejection:', r));
-process.on('uncaughtException', (e) => console.error('🔴 Critical Exception:', e));
+process.on('unhandledRejection', (r) => console.error('🔴 Rejection:', r));
+process.on('uncaughtException', (e) => console.error('🔴 Exception:', e));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
