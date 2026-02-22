@@ -12,9 +12,13 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
 
 const bot = new Telegraf(BOT_TOKEN);
+
+// PERMANENT FIX: Added keepAlive and socket settings to survive the 30s pause
 const client = new MongoClient(MONGO_URI, { 
     connectTimeoutMS: 60000, 
-    socketTimeoutMS: 60000 
+    socketTimeoutMS: 60000,
+    keepAlive: true,
+    maxPoolSize: 10
 });
 
 const app = express();
@@ -159,7 +163,7 @@ bot.command('preview', async (ctx) => {
     } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
 });
 
-// 6. PROTECTED BROADCAST WITH BATCHING
+// 6. PROTECTED BROADCAST WITH BATCHING (RESUME LOGS ADDED)
 bot.command('send', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     
@@ -188,10 +192,11 @@ bot.command('send', async (ctx) => {
     for (let i = 0; i < allUsers.length; i++) {
         const user = allUsers[i];
 
-        // PERMANENT FIX: Batch pause every 200 users
-        if (i > 0 && i % 200 === 0) {
-            console.log(`⏳ System: Batch limit reached. Pausing for 30s to prevent timeout...`);
+        // FIXED: Batch pause every 150 users + Resume Log
+        if (i > 0 && i % 150 === 0) {
+            console.log(`⏳ System: Batch limit reached at ${i}. Pausing for 30s to prevent timeout...`);
             await new Promise(r => setTimeout(r, 30000));
+            console.log(`▶️ System: Broadcast RESUMING for remaining users.`);
         }
 
         try {
