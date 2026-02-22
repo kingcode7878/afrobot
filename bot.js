@@ -185,46 +185,52 @@ bot.command('send', async (ctx) => {
     const allUsers = await usersCollection.find({}).project({ chat_id: 1 }).toArray();
     
     isBroadcasting = true;
-    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${allUsers.length} users.`);
+
+    // IMMEDIATELY reply to context to satisfy the 90s framework timeout
     ctx.reply(`🚀 Broadcasting to ${allUsers.length} users in batches...`);
+    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${allUsers.length} users.`);
 
-    let count = 0;
-    for (let i = 0; i < allUsers.length; i++) {
-        const user = allUsers[i];
+    // Run the broadcast in an asynchronous background process
+    (async () => {
+        let count = 0;
+        for (let i = 0; i < allUsers.length; i++) {
+            const user = allUsers[i];
 
-        // BATCH LOGIC: Pause every 150 users
-        if (i > 0 && i % 150 === 0) {
-            console.log(`⏳ System: Batch limit reached at ${i}. Pausing for 30s to prevent timeout...`);
-            await new Promise(r => setTimeout(r, 30000));
-            console.log(`▶️ System: Broadcast RESUMING for remaining users.`);
-        }
-
-        try {
-            let sent;
-            if (isUrl) {
-                if (media.match(/\.(mp4|mov|avi)$/i)) sent = await bot.telegram.sendVideo(user.chat_id, media, { caption: cap, ...extra });
-                else sent = await bot.telegram.sendPhoto(user.chat_id, media, { caption: cap, ...extra });
-            } else {
-                sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
+            // BATCH LOGIC: Pause every 150 users
+            if (i > 0 && i % 150 === 0) {
+                console.log(`⏳ System: Batch limit reached at ${i}. Pausing for 30s to prevent timeout...`);
+                await new Promise(r => setTimeout(r, 30000));
+                console.log(`▶️ System: Broadcast RESUMING for remaining users.`);
             }
-            
-            broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
-            
-            count++;
-            if (count % 20 === 0) console.log(`📡 Progress: ${count}/${allUsers.length}`);
-            
-            await new Promise(r => setTimeout(r, 150)); 
-        } catch (err) {
-            if (err.response?.error_code === 403) {
-                console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
-                usersCollection.deleteOne({ chat_id: user.chat_id }).catch(()=>{});
+
+            try {
+                let sent;
+                if (isUrl) {
+                    if (media.match(/\.(mp4|mov|avi)$/i)) sent = await bot.telegram.sendVideo(user.chat_id, media, { caption: cap, ...extra });
+                    else sent = await bot.telegram.sendPhoto(user.chat_id, media, { caption: cap, ...extra });
+                } else {
+                    sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
+                }
+                
+                broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
+                
+                count++;
+                if (count % 20 === 0) console.log(`📡 Progress: ${count}/${allUsers.length}`);
+                
+                await new Promise(r => setTimeout(r, 150)); 
+            } catch (err) {
+                if (err.response?.error_code === 403) {
+                    console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
+                    usersCollection.deleteOne({ chat_id: user.chat_id }).catch(()=>{});
+                }
             }
         }
-    }
-    
-    isBroadcasting = false;
-    console.log(`✅ Broadcast: Completed. Sent to ${count}. Triggered by ${ctx.from.id}`);
-    ctx.reply(`✅ Sent to ${count} users.`);
+        
+        isBroadcasting = false;
+        console.log(`✅ Broadcast: Completed. Sent to ${count}. Triggered by ${ctx.from.id}`);
+        // Send a final confirmation to the admin since the initial command already finished
+        bot.telegram.sendMessage(ctx.from.id, `✅ Broadcast: Completed. Sent to ${count} users.`);
+    })();
 });
 
 bot.command('deleteall', async (ctx) => {
