@@ -163,7 +163,7 @@ bot.command('preview', async (ctx) => {
     } catch (e) { ctx.reply(`❌ Preview Error: ${e.message}`); }
 });
 
-// 6. PROTECTED BROADCAST WITH BATCHING (RESUME LOGS INCLUDED)
+// 6. PROTECTED BROADCAST WITH BATCHING & CURSOR (SCALABLE FOR 20K+)
 bot.command('send', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.reply("Unauthorized.");
     
@@ -182,23 +182,30 @@ bot.command('send', async (ctx) => {
     const media = isUrl ? content.split(' ')[0] : null;
     const cap = isUrl ? content.split(' ').slice(1).join(' ') : content;
 
-    const allUsers = await usersCollection.find({}).project({ chat_id: 1 }).toArray();
-    
+    // Check for existing progress to resume after crash/restart
+    const progressDoc = await settingsCollection.findOne({ key: "broadcast_progress" });
+    const startFrom = progressDoc ? progressDoc.last_index : 0;
+    const totalUsers = await usersCollection.countDocuments();
+
     isBroadcasting = true;
 
-    // IMMEDIATELY reply to context to satisfy the 90s framework timeout
-    ctx.reply(`🚀 Broadcasting to ${allUsers.length} users in batches...`);
-    console.log(`🚀 Broadcast: Started by ${ctx.from.id} to ${allUsers.length} users.`);
+    // IMMEDIATELY reply to admin
+    ctx.reply(`🚀 Scalable Broadcast Started.\nTotal: ${totalUsers} users.\nResuming from: ${startFrom}`);
+    console.log(`🚀 Broadcast: Started by ${ctx.from.id}. Target: ${totalUsers}. Index: ${startFrom}`);
 
     // Run the broadcast in an asynchronous background process
     (async () => {
-        let count = 0;
-        for (let i = 0; i < allUsers.length; i++) {
-            const user = allUsers[i];
+        // Use CURSOR to handle 20,000+ users without RAM issues
+        const userCursor = usersCollection.find({}).project({ chat_id: 1 }).skip(startFrom);
+        let count = startFrom;
 
-            // BATCH LOGIC: Pause every 150 users
-            if (i > 0 && i % 150 === 0) {
-                console.log(`⏳ System: Batch limit reached at ${i}. Pausing for 30s to prevent timeout...`);
+        while (await userCursor.hasNext()) {
+            const user = await userCursor.next();
+
+            // BATCH LOGIC: Pause every 150 users & save progress
+            if (count > startFrom && count % 150 === 0) {
+                console.log(`⏳ System: Batch limit reached at ${count}. Pausing for 30s...`);
+                await settingsCollection.updateOne({ key: "broadcast_progress" }, { $set: { last_index: count } }, { upsert: true });
                 await new Promise(r => setTimeout(r, 30000));
                 console.log(`▶️ System: Broadcast RESUMING for remaining users.`);
             }
@@ -215,10 +222,11 @@ bot.command('send', async (ctx) => {
                 broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
                 
                 count++;
-                if (count % 20 === 0) console.log(`📡 Progress: ${count}/${allUsers.length}`);
+                if (count % 20 === 0) console.log(`📡 Progress: ${count}/${totalUsers}`);
                 
                 await new Promise(r => setTimeout(r, 150)); 
             } catch (err) {
+                console.error(`❌ Send Error (User: ${user.chat_id}): ${err.message}`);
                 if (err.response?.error_code === 403) {
                     console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
                     usersCollection.deleteOne({ chat_id: user.chat_id }).catch(()=>{});
@@ -227,9 +235,9 @@ bot.command('send', async (ctx) => {
         }
         
         isBroadcasting = false;
-        console.log(`✅ Broadcast: Completed. Sent to ${count}. Triggered by ${ctx.from.id}`);
-        // Send a final confirmation to the admin since the initial command already finished
-        bot.telegram.sendMessage(ctx.from.id, `✅ Broadcast: Completed. Sent to ${count} users.`);
+        await settingsCollection.deleteOne({ key: "broadcast_progress" }); // Clear progress on finish
+        console.log(`✅ Broadcast: Completed. Total processed: ${count}.`);
+        bot.telegram.sendMessage(ctx.from.id, `✅ Broadcast: Completed. Total processed: ${count}.`);
     })();
 });
 
