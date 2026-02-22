@@ -12,7 +12,14 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => parseInt(id.trim())) : [];
 
 const bot = new Telegraf(BOT_TOKEN);
-const client = new MongoClient(MONGO_URI, { connectTimeoutMS: 30000 });
+
+// PERMANENT FIX: Increased connection stability parameters
+const client = new MongoClient(MONGO_URI, { 
+    connectTimeoutMS: 60000, 
+    socketTimeoutMS: 60000,
+    maxIdleTimeMS: 60000 
+});
+
 const app = express();
 
 let usersCollection;
@@ -36,7 +43,6 @@ async function connectDB() {
         settingsCollection = database.collection('settings');
         console.log("✅ Database: Connected successfully to MongoDB.");
 
-        // Hourly Health Check
         setInterval(async () => {
             try {
                 const count = await usersCollection.countDocuments();
@@ -175,7 +181,7 @@ bot.command('send', async (ctx) => {
     const media = isUrl ? content.split(' ')[0] : null;
     const cap = isUrl ? content.split(' ').slice(1).join(' ') : content;
 
-    // PROJECTED FETCH: We convert to Array IMMEDIATELY to close the DB cursor and prevent 90s timeout
+    // PROJECTED FETCH: We convert to Array IMMEDIATELY to stop the 90s timeout
     const allUsers = await usersCollection.find({}).project({ chat_id: 1 }).toArray();
     
     isBroadcasting = true;
@@ -193,7 +199,7 @@ bot.command('send', async (ctx) => {
                 sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
             }
             
-            // Log entry - fire and forget to keep loop speed up
+            // FIRE AND FORGET LOGGING (No 'await' here means no timeout crash)
             broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
             
             count++;
