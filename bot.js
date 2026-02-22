@@ -175,7 +175,7 @@ bot.command('send', async (ctx) => {
     const media = isUrl ? content.split(' ')[0] : null;
     const cap = isUrl ? content.split(' ').slice(1).join(' ') : content;
 
-    // PROJECTED FETCH: This is the ONLY logic change allowed to stop the 90,000ms crash
+    // PROJECTED FETCH: We convert to Array IMMEDIATELY to close the DB cursor and prevent 90s timeout
     const allUsers = await usersCollection.find({}).project({ chat_id: 1 }).toArray();
     
     isBroadcasting = true;
@@ -193,7 +193,8 @@ bot.command('send', async (ctx) => {
                 sent = await bot.telegram.sendMessage(user.chat_id, cap, extra);
             }
             
-            await broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() });
+            // Log entry - fire and forget to keep loop speed up
+            broadcastLogsCollection.insertOne({ broadcast_id: "last", chat_id: user.chat_id, message_id: sent.message_id, sent_at: new Date() }).catch(()=>{});
             
             count++;
             if (count % 20 === 0) console.log(`📡 Progress: ${count}/${allUsers.length}`);
@@ -202,7 +203,7 @@ bot.command('send', async (ctx) => {
         } catch (err) {
             if (err.response?.error_code === 403) {
                 console.log(`🗑 Cleanup: Removing blocked user ${user.chat_id}`);
-                await usersCollection.deleteOne({ chat_id: user.chat_id });
+                usersCollection.deleteOne({ chat_id: user.chat_id }).catch(()=>{});
             }
         }
     }
